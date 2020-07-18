@@ -486,10 +486,10 @@ static __strong NSData *CRLFCRLF;
     }
                         
     [self _readUntilHeaderCompleteWithCallback:^(SRWebSocket *self,  NSData *data) {
-        CFHTTPMessageAppendBytes(_receivedHTTPHeaders, (const UInt8 *)data.bytes, data.length);
+        CFHTTPMessageAppendBytes(self->_receivedHTTPHeaders, (const UInt8 *)data.bytes, data.length);
         
-        if (CFHTTPMessageIsHeaderComplete(_receivedHTTPHeaders)) {
-            SRFastLog(@"Finished reading headers %@", CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(_receivedHTTPHeaders)));
+        if (CFHTTPMessageIsHeaderComplete(self->_receivedHTTPHeaders)) {
+            SRFastLog(@"Finished reading headers %@", CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(self->_receivedHTTPHeaders)));
             [self _HTTPHeadersDidFinish];
         } else {
             [self _readHTTPHeader];
@@ -506,7 +506,10 @@ static __strong NSData *CRLFCRLF;
     CFHTTPMessageSetHeaderFieldValue(request, CFSTR("Host"), (__bridge CFStringRef)(_url.port ? [NSString stringWithFormat:@"%@:%@", _url.host, _url.port] : _url.host));
         
     NSMutableData *keyBytes = [[NSMutableData alloc] initWithLength:16];
-    SecRandomCopyBytes(kSecRandomDefault, keyBytes.length, keyBytes.mutableBytes);
+    int result = SecRandomCopyBytes(kSecRandomDefault, keyBytes.length, keyBytes.mutableBytes);
+    if (result != 0) {
+        //FIXME:
+    }
     
     if ([keyBytes respondsToSelector:@selector(base64EncodedStringWithOptions:)]) {
         _secKey = [keyBytes base64EncodedStringWithOptions:0];
@@ -628,6 +631,10 @@ static __strong NSData *CRLFCRLF;
     NSString *networkServiceType;
     switch (requestNetworkServiceType) {
         case NSURLNetworkServiceTypeDefault:
+        case NSURLNetworkServiceTypeResponsiveData:
+        case NSURLNetworkServiceTypeAVStreaming:
+        case NSURLNetworkServiceTypeResponsiveAV:
+        case NSURLNetworkServiceTypeCallSignaling:
             break;
         case NSURLNetworkServiceTypeVoIP: {
             networkServiceType = NSStreamNetworkServiceTypeVoIP;
@@ -743,7 +750,7 @@ static __strong NSData *CRLFCRLF;
     // Need to shunt this on the _callbackQueue first to see if they received any messages 
     [self _performDelegateBlock:^{
         [self closeWithCode:SRStatusCodeProtocolError reason:message];
-        dispatch_async(_workQueue, ^{
+        dispatch_async(self->_workQueue, ^{
             [self closeConnection];
         });
     }];
@@ -753,7 +760,7 @@ static __strong NSData *CRLFCRLF;
 {
     dispatch_async(_workQueue, ^{
         if (self.readyState != SR_CLOSED) {
-            _failed = YES;
+            self->_failed = YES;
             [self _performDelegateBlock:^{
                 if ([self.delegate respondsToSelector:@selector(webSocket:didFailWithError:)]) {
                     [self.delegate webSocket:self didFailWithError:error];
@@ -813,7 +820,7 @@ static __strong NSData *CRLFCRLF;
 {
     // Need to pingpong this off _callbackQueue first to make sure messages happen in order
     [self _performDelegateBlock:^{
-        dispatch_async(_workQueue, ^{
+        dispatch_async(self->_workQueue, ^{
             [self _sendFrameWithOpcode:SROpCodePong data:pingData];
         });
     }];
@@ -1097,7 +1104,7 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
             [self _closeWithProtocolError:@"Client must receive unmasked data"];
         }
         
-        size_t extra_bytes_needed = header.masked ? sizeof(_currentReadMaskKey) : 0;
+        size_t extra_bytes_needed = header.masked ? sizeof(self->_currentReadMaskKey) : 0;
         
         if (header.payload_length == 126) {
             extra_bytes_needed += sizeof(uint16_t);
@@ -1128,7 +1135,7 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
                 }
                 
                 if (header.masked) {
-                    assert(mapped_size >= sizeof(_currentReadMaskOffset) + offset);
+                    assert(mapped_size >= sizeof(self->_currentReadMaskOffset) + offset);
                     memcpy(self->_currentReadMaskKey, ((uint8_t *)mapped_buffer) + offset, sizeof(self->_currentReadMaskKey));
                 }
                 
@@ -1141,12 +1148,12 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
 - (void)_readFrameNew;
 {
     dispatch_async(_workQueue, ^{
-        [_currentFrameData setLength:0];
+        [self->_currentFrameData setLength:0];
         
-        _currentFrameOpcode = 0;
-        _currentFrameCount = 0;
-        _readOpCount = 0;
-        _currentStringScanPosition = 0;
+        self->_currentFrameOpcode = 0;
+        self->_currentFrameCount = 0;
+        self->_readOpCount = 0;
+        self->_currentStringScanPosition = 0;
         
         [self _readFrameContinue];
     });
@@ -1192,7 +1199,7 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
         if (!_failed) {
             [self _performDelegateBlock:^{
                 if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
-                    [self.delegate webSocket:self didCloseWithCode:_closeCode reason:_closeReason wasClean:YES];
+                    [self.delegate webSocket:self didCloseWithCode:self->_closeCode reason:self->_closeReason wasClean:YES];
                 }
             }];
         }
@@ -1254,7 +1261,7 @@ static const uint8_t SRPayloadLenMask   = 0x7F;
     
     // Cleanup selfRetain in the same GCD queue as usual
     dispatch_async(_workQueue, ^{
-        _selfRetain = nil;
+        self->_selfRetain = nil;
     });
 }
 
@@ -1482,7 +1489,10 @@ static const size_t SRFrameHeaderOverhead = 32;
         }
     } else {
         uint8_t *mask_key = frame_buffer + frame_buffer_size;
-        SecRandomCopyBytes(kSecRandomDefault, sizeof(uint32_t), (uint8_t *)mask_key);
+        int result = SecRandomCopyBytes(kSecRandomDefault, sizeof(uint32_t), (uint8_t *)mask_key);
+        if (result != 0) {
+            //FIXME:
+        }
         frame_buffer_size += sizeof(uint32_t);
         
         // TODO: could probably optimize this with SIMD
@@ -1586,8 +1596,8 @@ static const size_t SRFrameHeaderOverhead = 32;
                             [self _scheduleCleanup];
                         }
                         
-                        if (!_sentClose && !_failed) {
-                            _sentClose = YES;
+                        if (!self->_sentClose && !self->_failed) {
+                            self->_sentClose = YES;
                             // If we get closed in this state it's probably not clean because we should be sending this when we send messages
                             [self _performDelegateBlock:^{
                                 if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
